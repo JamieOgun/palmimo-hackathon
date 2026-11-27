@@ -1,175 +1,69 @@
-# palmimo-app-template
+# palmimo-hackathon: a personal companion
 
-Palmimo DevKit で動かすアプリのテンプレートです。Palmimo Portal（DevKit の管理画面）から
-インストール・起動・更新できる形になっています。
+Palmimo learns its owner's face once. After that it chats, keeps conversation history and builds long-term memories, but **only with that person**. Anyone else gets a friendly head shake and no cloud call.
 
-入っているもの:
+## How it works
+- **Face gate (on-device):** OpenCV YuNet finds the face and SFace turns it into 128 numbers. That vector is compared with the enrolled owner using cosine similarity (threshold 0.40). No photos are stored.
+- **Privacy rule:** speech goes to OpenAI (speech-to-text and chat) only while the owner's face is in view.
+- **Memory:** every message is stored encrypted. When a session ends (owner out of view for 60 s), the LLM merges the conversation into a short list of facts about you, which is added to future prompts.
+- **Encryption:** face embeddings, messages and memories are Fernet-encrypted in SQLite under `~/.local/share/palmimo-hackathon/`. The key lives in the same folder with 0600 permissions. This protects copies of the database, not someone with root on the Pi.
 
-| ファイル | 役割 |
+## Use it (Portal)
+1. Set `OPENAI_API_KEY` in the Portal's environment screen.
+2. Launch with **mode = enroll** and your name. Look at Palmimo while it moves its head.
+3. Launch with **mode = run** and talk.
+   - "What do you remember about me?" reads back your memories.
+   - "Forget that" drops the last exchange.
+   - "Forget everything" erases all memories.
+4. **mode = forget** erases your face, history and memories.
+
+## Develop on a laptop
+```bash
+uv sync
+uv run pytest                                          # unit tests
+uv run python main.py --mode enroll --name Jamie --no-hardware --webcam
+OPENAI_API_KEY=... uv run python main.py --no-hardware --webcam   # type to talk; the webcam gates who you are
+OPENAI_API_KEY=... uv run python main.py --no-hardware            # no camera; prefix a line with !stranger
+```
+
+## Layout
+| File | Role |
 |---|---|
-| `palmimo.toml` | Portal がアプリを一覧に出し、設定フォームを作り、起動するための定義（マニフェスト） |
-| `main.py` | サンプル。Portal で設定した値をログに出すだけで、ハードウェアには触りません |
-| `.gitignore` | `.venv/` などをコミットしないための設定 |
+| `main.py` | entry point and modes |
+| `companion/companion.py` | identity gate, sessions, replies, memory commands |
+| `companion/face.py` | face detection, embeddings, `PresenceTracker` |
+| `companion/enroll.py` | the head-sweep enrollment ritual |
+| `companion/hearing.py`, `companion/vad.py` | mic → Silero VAD → utterances (VAD adapted from Jizai's companion-realtime, Apache-2.0) |
+| `companion/brain.py` | OpenAI speech-to-text, chat, memory consolidation |
+| `companion/body.py` | speech, neck, gestures, face display |
+| `companion/store.py`, `companion/vault.py` | encrypted SQLite store |
 
-`pyproject.toml` と `uv.lock` はあえて入れていません。手順 2 で `uv init` と `uv add` を実行して作ると、
-その時点の最新の palmimo-sdk が入ります。
+`TEMPLATE_GUIDE.md` is the original Portal template guide (Japanese).
 
-## 1. 開発手順
+## Next
+- Voice verification as a second check (sherpa-onnx speaker embeddings, already installed with `palmimo-sdk[voice]`).
+- Guests: "This is Sam, my friend" enrolls a guest who gets friendly chat but no access to your memories.
 
-### 必要なもの
-
-- [uv](https://docs.astral.sh/uv/)
-- git
-- 同じネットワークにある Palmimo DevKit と、その Portal にログインできるブラウザ
-
-### テンプレートから自分のリポジトリを作る
-
-GitHub のこのリポジトリで **Use this template** → **Create a new repository** を選び、
-自分のアカウント（または組織）にリポジトリを作って clone します。
-
+## Debugging
+Every run logs to the Portal's log screen and to `~/.local/share/palmimo-hackathon/logs/companion.log` (rotating, 2 MB × 5, readable only by you):
 ```bash
-git clone https://github.com/<owner>/<repo>.git
-cd <repo>
+ssh palmimo 'tail -f ~/.local/share/palmimo-hackathon/logs/companion.log'
 ```
+- **Startup** prints the config, SDK version, whether the API key is set, and who is enrolled.
+- **Every turn** gets a number: `turn 7: gate=owner Jamie (similarity 0.71) -> speech-to-text + chat`, then `turn 7: done, stt=0.61s chat=1.20s speak=2.30s`.
+- **Presence changes** (`presence: owner -> stranger (similarity 0.18, threshold 0.40)`) and gate decisions explain why Palmimo did or didn't answer.
+- **Heartbeats** every 60 s: frames checked by the face gate, and the mic's peak level (0 = dead mic, 32767 = clipping).
+- **OpenAI errors** are one line saying what to fix (bad key, unknown model, no internet, out of credits).
+- **Crashes in background threads** are logged as `CRITICAL crash` with a traceback, instead of failing silently.
 
-### Python プロジェクトにする
+Portal params:
+- **log_level = debug** adds every face match score, motion, expression and token count. Use it to tune `face_threshold`: compare your scores with a stranger's.
+- **log_text** adds what was actually said. It's off by default because conversations are private.
 
-```bash
-uv init --app --python 3.13
-uv add palmimo-sdk
-```
-
-- `uv init` は `pyproject.toml` と `.python-version` を作ります。テンプレートの `main.py`・`README.md`・`.gitignore` は上書きされません。
-- `uv add palmimo-sdk` で最新の palmimo-sdk が入り、`uv.lock` ができます。
-- `--python 3.13` は DevKit に入っている Python の版です。別の版を指定すると、Portal がインストール時にその版の Python を取得するので、初回のインストールに時間がかかります。
-
-手元で動かしてみます。
-
-```bash
-uv run python main.py --message "テスト" --repeat 2
-```
-
-### アプリを作る
-
-1. `palmimo.toml` の `name` と `description` を自分のアプリに合わせて書き換えます。
-   - `name` は英小文字・数字・ハイフンで 40 文字まで（先頭は英字）です。
-   - 端末上のアプリ ID は `<入れた場所>.<name>` になります。GitHub から入れたときの「入れた場所」は owner 名、zip なら `zip` です。
-2. `main.py` を書き換えます。`palmimo_sdk` の使い方は [palmimo-devkit のドキュメント](https://github.com/Jizai-inc/palmimo-devkit/tree/main/doc)を参照してください。
-3. 必要なら `palmimo.toml` を書き換えます。
-   - `command`: 起動するコマンド。アプリのディレクトリで `uv run` を通して実行されます。
-   - `[params.*]`: Portal の画面から変えられる設定。`command` の中の `{名前}` が設定値に置き換わります。
-   - `devices`: サーボ（`motor_display`）、カメラ（`camera`）、マイク・スピーカー（`audio`）を使うときに宣言します。宣言しないデバイスはアプリから開けません。
-   - `[env.*]`: API キーなどの秘密の値。値は Portal の「環境変数」画面で入れます。
-
-   書き方の全体は [マニフェストの仕様](https://github.com/Jizai-inc/palmimo-devkit/blob/main/doc/reference/app-manifest.md)にあります。
-
-4. `pyproject.toml`・`uv.lock`・`.python-version` も含めてコミットし、push します。
-
-```bash
-git add .
-git commit -m "My first Palmimo app"
-git push
-```
-
-`uv.lock` は必ずコミットしてください。Portal は `uv.lock` どおりに依存を入れるので、手元と DevKit で同じ版がそろいます。
-
-## 2. DevKit へのインストール（アップロード）
-
-入れ方は 3 つあります。**GitHub から入れるのがおすすめです**。push するだけで、あとから Portal で更新できます。
-
-### GitHub から入れる（公開リポジトリ）
-
-1. Portal の **アプリ** を開き、**アプリを追加** を押します。
-
-   ![アプリ一覧](docs/images/01-apps.jpg)
-
-2. **GitHub URL** タブで、リポジトリの URL とブランチ（またはタグ）を入れて **インストール** を押します。
-   `palmimo.toml` がリポジトリの直下にないときは、**サブディレクトリ** にそのディレクトリを入れます。
-
-   ![GitHub URL から追加](docs/images/02-add-github.jpg)
-
-3. 確認画面で **ID**（端末上の名前）を確かめて **インストール** を押します。同じ名前のアプリがすでにあると `-2` などが付きます。ここで名前を変えることもできます。
-
-   ![インストールの確認](docs/images/03-install-dialog.jpg)
-
-4. インストールが終わると、アプリの画面が開きます。
-
-   ![アプリの画面](docs/images/04-app-detail.jpg)
-
-### GitHub から入れる（非公開リポジトリ）
-
-非公開リポジトリは、先に Portal にアクセストークンを登録します。
-
-1. GitHub で **fine-grained personal access token** を作ります。対象のリポジトリを選び、権限は **Contents: Read-only** だけにします。
-2. Portal の **Git 認証情報** → **認証情報を追加** で、**ホスト / オーナー**（例: `github.com/<owner>`）とトークンを入れて保存します。
-   登録はオーナーごとに 1 つで、同じオーナーでもう一度保存すると置き換わります。
-
-   ![Git 認証情報の追加](docs/images/09-git-credentials.jpg)
-
-3. あとは公開リポジトリと同じ手順で入れます。
-
-### zip で入れる
-
-GitHub を使わないときは zip でも入れられます。ただし **zip で入れたアプリには更新機能がありません**（後述）。
-
-1. zip を作ります。`git archive` を使うと、コミットしたファイルだけが入ります。`.venv/` は入れないでください（シンボリックリンクを含む zip はインストールできません）。
-
-   ```bash
-   git archive -o my-app.zip HEAD
-   ```
-
-2. **アプリを追加** の **Zip** タブで zip を選び、**インストール** を押します。
-
-   ![zip から追加](docs/images/10-add-zip.jpg)
-
-zip は 200 MB まで、展開後の合計は 1 GB までです。
-
-## 3. 起動と設定
-
-1. アプリの画面の **パラメータ** で値を入れて **パラメータを保存** を押します。
-
-   ![パラメータの設定](docs/images/05-params.jpg)
-
-2. 右上の **起動** を押すと、**ログ** にアプリの出力が出ます。止めるときは **停止** を押します。
-
-   ![ログ](docs/images/06-logs.jpg)
-
-- **自動起動** にチェックを入れると、DevKit の電源を入れたときにこのアプリが自動で起動します。
-- アプリの起動中は、ほかのアプリのインストール・更新・削除はできません。
-
-## 4. アップデート
-
-### GitHub から入れたアプリ
-
-1. 手元で変更してコミットし、GitHub に push します。依存を増やしたときは `uv.lock` もコミットします。
-
-   ```bash
-   git commit -am "Update my app"
-   git push
-   ```
-
-2. Portal のアプリの画面の **ソースと更新** で **更新を確認** を押します。新しいコミットがあると **更新あり** と出るので、**更新** を押します。
-
-   ![更新あり](docs/images/07-update-available.jpg)
-
-3. 更新が終わると、**コミット** が push したものに変わります。パラメータ・自動起動・環境変数の設定はそのまま残ります。
-
-   ![更新後](docs/images/08-updated.jpg)
-
-- 起動中のアプリは更新できません。先に **停止** してください。
-- 入れるブランチやタグを変えるときは、**ソースと更新** の **編集** から変えます。
-- タグで入れた場合は、新しいタグを作って **編集** でそのタグに切り替えます。
-
-### zip で入れたアプリ
-
-zip で入れたアプリは更新できません。アプリの画面の **このアプリを削除** で削除してから、新しい zip を入れ直してください。
-パラメータなどの設定は入れ直すと消えるので、控えておいてください。
-
-## 困ったとき
-
-- **インストールで失敗する**: エラーの内容はダイアログに出ます。多いのは次のものです。
-  - `palmimo.toml` の書き方の誤り
-  - `pyproject.toml` や `uv.lock` のコミット忘れ
-  - 非公開リポジトリで Git 認証情報を登録していない
-- **起動してすぐ止まる**: **ログ** にエラーが出ます。手元で `uv run python main.py` が動くかを先に確かめてください。
-- **マニフェストの細かい仕様**: [app-manifest.md](https://github.com/Jizai-inc/palmimo-devkit/blob/main/doc/reference/app-manifest.md)
+| Symptom | Look for |
+|---|---|
+| Ignores you | `speech ignored: nobody in view`, or `presence: ... stranger (similarity 0.3x)` → lower `face_threshold` or re-enroll in better light |
+| Never hears anything | `no audio from the mic`, or a mic heartbeat peak near 0 → try `--no-echo-cancel` |
+| Answers a stranger | debug `match:` lines with stranger scores above the threshold → raise `face_threshold` |
+| Robot doesn't move | `hardware connect failed` (another app holds the servos) or `neck lock active` (the neck is too hot) |
+| Slow replies | the `turn N: done` timings show whether STT, chat or speech is the slow part |

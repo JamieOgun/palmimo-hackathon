@@ -1,35 +1,69 @@
-# Palmimo Portal がこのアプリを一覧に出し、設定フォームを作り、起動するための定義。
-# 仕様: https://github.com/Jizai-inc/palmimo-devkit/blob/main/doc/reference/app-manifest.md
+# Palmimo Portal manifest. Spec: https://github.com/Jizai-inc/palmimo-devkit/blob/main/doc/reference/app-manifest.md
 
 schema = 1
 
-# アプリ名。英小文字・数字・ハイフン（先頭は英字、40 文字まで）。
-# 端末上の ID は「<入れた場所>.<name>」になる（GitHub なら owner 名、zip なら zip）。
 name = "palmimo-hackathon"
-description = "Palmimo アプリのテンプレート。Portal で設定した値をログに出します。"
+description = "A personal companion that recognizes its owner's face, remembers them, and chats only with them."
 
-# 起動コマンド。シェルは通さないので配列で書く。{param} は下の params の値に置き換わる。
-# Portal はこれをアプリのディレクトリで `uv run` 経由で実行する。
-command = ["python", "main.py", "--message", "{message}", "--repeat", "{repeat}"]
+# Run "enroll" once (look at Palmimo while it moves its head), then "run".
+command = [
+  "python", "main.py",
+  "--mode", "{mode}",
+  "--name", "{owner_name}",
+  "--chat-model", "{chat_model}",
+  "--stt-model", "{stt_model}",
+  "--face-threshold", "{face_threshold}",
+  "--log-level", "{log_level}",
+  "{log_text}",
+]
 
-# 使うデバイス。camera / audio / motor_display から選ぶ。書かなければどのデバイスも開けない。
-# devices = ["motor_display"]
+devices = ["camera", "audio", "motor_display"]
 
-[params.message]
+[params.mode]
+type = "enum"
+choices = ["run", "enroll", "forget"]
+default = "run"
+description = "enroll: learn your face. run: companion mode. forget: erase your face, history and memories."
+
+[params.owner_name]
 type = "string"
-default = "こんにちは、Palmimo!"
-max_length = 100
-description = "ログに出すメッセージ"
+default = "Jamie"
+pattern = "^[A-Za-z][A-Za-z ' -]{0,39}$"
+max_length = 40
+description = "Your name, used during enroll and forget."
 
-[params.repeat]
-type = "int"
-default = 3
-min = 1
-max = 10
-description = "くり返す回数"
+[params.chat_model]
+type = "string"
+default = "gpt-5-mini"
+pattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+description = "OpenAI model for conversation and memory."
 
-# API キーなど、秘密にしたい値は env で宣言する。値は Portal の「環境変数」画面で入れる。
-# [env.EXAMPLE_API_KEY]
-# required = false
-# description = "外部サービスの API キー"
-# help_url = "https://example.com/api-keys"
+[params.stt_model]
+type = "string"
+default = "gpt-4o-mini-transcribe"
+pattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+description = "OpenAI speech-to-text model."
+
+[params.face_threshold]
+type = "float"
+default = 0.40
+min = 0.30
+max = 0.70
+description = "How similar a face must be to count as you. Higher is stricter."
+
+[params.log_level]
+type = "enum"
+choices = ["info", "debug"]
+default = "info"
+description = "debug adds every face match score, motion and token count. Log file: ~/.local/share/palmimo-hackathon/logs/"
+
+[params.log_text]
+type = "bool"
+flag = "--log-text"
+default = false
+description = "Include what was said in the logs. Off by default because conversations are private."
+
+[env.OPENAI_API_KEY]
+required = true
+description = "OpenAI API key for speech-to-text and conversation (only used after your face is recognized)."
+help_url = "https://platform.openai.com/api-keys"
